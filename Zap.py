@@ -161,7 +161,7 @@ def loadFieldList(sPath):
 
     iName = colidx("Display name") or colidx("Field") or 0
     iType = colidx("Type")
-    iId   = colidx("Field ID") or colidx("ID") or 2
+    iId   = colidx("Field ID") or colidx("ID")
 
     for r in aRows[1:]:
         sName = str(r[iName]).strip() if iName is not None and iName < len(r) else ""
@@ -209,29 +209,26 @@ def buildWindowsUtc(aDateRanges, sStartTime, sEndTime):
     if not aDateRanges and not sStartTime and not sEndTime:
         t = nowMnl.time()
         def T(h, m): return datetime.time(hour=h, minute=m)
-        # Default shift logic (three shifts described)
-        # morning: 06:30 -> 18:30, afternoon: 01:30 -> 13:30, evening: 21:30 -> 09:30 (cross-midnight handled)
-        if t >= T(6,30) and t < T(13,30):
+        if t < T(1,30):
             d = nowMnl.date()
-            start = datetime.datetime.combine(d, T(6,30), tzMnl)
-            end   = datetime.datetime.combine(d, T(18,30), tzMnl)
-            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "morning"))
-        elif t >= T(13,30) and t < T(21,30):
-            d = nowMnl.date()
-            start = datetime.datetime.combine(d, T(13,30), tzMnl)
+            start = datetime.datetime.combine(d, T(13,0), tzMnl)
             end   = datetime.datetime.combine(d, T(1,30), tzMnl) + datetime.timedelta(days=1)
             aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "afternoon"))
-        else:
-            # evening: from 21:30 previous day to 09:30 today (if t < 9:30)
-            if t < T(9,30):
-                d = nowMnl.date()
-                start = datetime.datetime.combine(d - datetime.timedelta(days=1), T(21,30), tzMnl)
-                end   = datetime.datetime.combine(d, T(9,30), tzMnl)
-            else:
-                d = nowMnl.date()
-                start = datetime.datetime.combine(d, T(21,30), tzMnl)
-                end   = datetime.datetime.combine(d + datetime.timedelta(days=1), T(9,30), tzMnl)
+        elif t < T(9,30):
+            d = nowMnl.date()
+            start = datetime.datetime.combine(d- datetime.timedelta(days=1), T(21,30), tzMnl)
+            end   = datetime.datetime.combine(d, T(9,30), tzMnl)
             aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "evening"))
+        elif t < T(18,30):
+            d = nowMnl.date()
+            start = datetime.datetime.combine(d, T(18,30), tzMnl)
+            end   = datetime.datetime.combine(d+ datetime.timedelta(days=1), T(6,30), tzMnl)
+            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "morning"))
+        else:
+            d = nowMnl.date()
+            start = datetime.datetime.combine(d, T(18,30), tzMnl)
+            end   = datetime.datetime.combine(d+ datetime.timedelta(days=1), T(6,30), tzMnl)
+            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "morning"))
         return aOut
 
     if sStartTime or sEndTime:
@@ -240,7 +237,6 @@ def buildWindowsUtc(aDateRanges, sStartTime, sEndTime):
             sys.exit(1)
         tStart = parseTime12(sStartTime)
         tEnd   = parseTime12(sEndTime)
-        # allow end > start only (same day); user requested end after start
         if (datetime.datetime.combine(datetime.date.today(), tEnd) <=
             datetime.datetime.combine(datetime.date.today(), tStart)):
             print("Time window must be within the day (end after start).")
@@ -307,24 +303,22 @@ class Resolver:
         ids = [str(i) for i in ids if i]
         if not ids:
             return
-        # Zendesk show_many endpoints accept up to ~100 ids, chunk if needed
-        for i in range(0, len(ids), 100):
-            chunk = ids[i:i+100]
-            if kind == "org":
-                sUrl = f"{self.h.sBase}/api/v2/organizations/show_many.json?ids={','.join(chunk)}"
-                d = self.h._get_json(sUrl)
-                for x in d.get("organizations", []):
-                    self.org[str(x.get("id"))] = x.get("name") or ""
-            elif kind == "usr":
-                sUrl = f"{self.h.sBase}/api/v2/users/show_many.json?ids={','.join(chunk)}"
-                d = self.h._get_json(sUrl)
-                for x in d.get("users", []):
-                    self.usr[str(x.get("id"))] = x.get("name") or ""
-            elif kind == "grp":
-                sUrl = f"{self.h.sBase}/api/v2/groups/show_many.json?ids={','.join(chunk)}"
-                d = self.h._get_json(sUrl)
-                for x in d.get("groups", []):
-                    self.grp[str(x.get("id"))] = x.get("name") or ""
+        sUrl = ""
+        if kind == "org":
+            sUrl = f"{self.h.sBase}/api/v2/organizations/show_many.json?ids={','.join(ids)}"
+            d = self.h._get_json(sUrl)
+            for x in d.get("organizations", []):
+                self.org[str(x.get("id"))] = x.get("name") or ""
+        elif kind == "usr":
+            sUrl = f"{self.h.sBase}/api/v2/users/show_many.json?ids={','.join(ids)}"
+            d = self.h._get_json(sUrl)
+            for x in d.get("users", []):
+                self.usr[str(x.get("id"))] = x.get("name") or ""
+        elif kind == "grp":
+            sUrl = f"{self.h.sBase}/api/v2/groups/show_many.json?ids={','.join(ids)}"
+            d = self.h._get_json(sUrl)
+            for x in d.get("groups", []):
+                self.grp[str(x.get("id"))] = x.get("name") or ""
 
     def preload_from_tickets(self, aTickets):
         aOrg = set()
@@ -340,14 +334,14 @@ class Resolver:
         self._fetch_batch("usr", [i for i in aUsr if i not in self.usr])
         self._fetch_batch("grp", [i for i in aGrp if i not in self.grp])
 
-    def org_name(self, v): return self.org.get(str(v), "") if v else ""
-    def user_name(self, v): return self.usr.get(str(v), "") if v else ""
-    def group_name(self, v): return self.grp.get(str(v), "") if v else ""
+    def org_name(self, v): return self.org.get(str(v), "")
+    def user_name(self, v): return self.usr.get(str(v), "")
+    def group_name(self, v): return self.grp.get(str(v), "")
 
 # Extract custom field by id
 def customVal(dT, nId):
     try:
-        for cf in dT.get("custom_fields", []) or []:
+        for cf in dT.get("custom_fields", []):
             if str(cf.get("id")) == str(nId):
                 return cf.get("value")
     except Exception:
@@ -373,37 +367,37 @@ def harvestTicketsInWindows(oHttp, aWindowsUtc):
                     seen.add(tid)
                     aAll.append(r)
             sPage = oHttp.next_link(dJ)
-    # ensure deterministic ordering by id ascending
-    aAll.sort(key=lambda x: x.get("id", 0))
     return aAll
 
-# Write header / append per-batch to CSV
-def writeBatchAppend(sCsv, aHeaders, aRowsBatch, bWriteHeader):
-    mode = "a"
-    exists = os.path.isfile(sCsv)
-    with open(sCsv, mode, newline="", encoding="utf-8-sig") as f:
+# Write one CSV and optional XLSX
+def writeOutput(sBaseName, aRows, aHeaders, bMakeXlsx):
+    sCsv = f"{sBaseName}.csv"
+    with open(sCsv, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=aHeaders, extrasaction="ignore", quoting=csv.QUOTE_ALL, lineterminator="\r\n")
-        if bWriteHeader and not exists:
-            w.writeheader()
-        for row in aRowsBatch:
+        w.writeheader()
+        for row in aRows:
             w.writerow({k: cellValue(row.get(k)) for k in aHeaders})
+    print(f"Wrote CSV -> {sCsv}")
 
-def writeOutputFinalXlsx(sBaseName, aHeaders):
-    if xlsxwriter is None:
-        print("xlsxwriter not installed, skipping workbook.")
-        return
-    sX = f"{sBaseName}.xlsx"
-    wb = xlsxwriter.Workbook(sX, {"constant_memory": True})
-    ws = wb.add_worksheet("tickets")
-    fmtHead = wb.add_format({"bold": True, "border": 1, "text_wrap": True, "align": "center", "valign": "vcenter"})
-    fmtVal  = wb.add_format({"border": 1, "text_wrap": True, "align": "left", "valign": "vcenter"})
-    for j, h in enumerate(aHeaders):
-        ws.write(0, j, h, fmtHead)
-    ws.set_row(0, 22)
-    for j in range(len(aHeaders)):
-        ws.set_column(j, j, 28)
-    wb.close()
-    print(f"Wrote XLSX -> {sX}")
+    if bMakeXlsx:
+        if xlsxwriter is None:
+            print("xlsxwriter not installed, skipping workbook.")
+            return
+        sX = f"{sBaseName}.xlsx"
+        wb = xlsxwriter.Workbook(sX, {"constant_memory": True})
+        ws = wb.add_worksheet("tickets")
+        fmtHead = wb.add_format({"bold": True, "border": 1, "text_wrap": True, "align": "center", "valign": "vcenter"})
+        fmtVal  = wb.add_format({"border": 1, "text_wrap": True, "align": "left", "valign": "vcenter"})
+        for j, h in enumerate(aHeaders):
+            ws.write(0, j, h, fmtHead)
+        for i, row in enumerate(aRows, start=1):
+            for j, h in enumerate(aHeaders):
+                ws.write(i, j, cellValue(row.get(h)), fmtVal)
+        ws.set_row(0, 22)
+        for j in range(len(aHeaders)):
+            ws.set_column(j, j, 28)
+        wb.close()
+        print(f"Wrote XLSX -> {sX}")
 
 def main():
     oP = argparse.ArgumentParser(
@@ -454,36 +448,21 @@ def main():
     aTickets = harvestTicketsInWindows(http, aWindowsUtc)
 
     nChunkSize = 50
-    aHeadersStd = ["ID", "Organization", "Assignee", "Group", "Status", "Type", "Subject", "Tags", "Created at", "Updated at"]
-    aCustomCols = [s for (s, t, i) in aFlds]
-    aHeaders = aHeadersStd + aCustomCols
-
-    # prepare output base name
-    if a.output:
-        sBase = os.path.splitext(a.output)[0]
-    else:
-        nowMnl = datetime.datetime.now(ZoneInfo("Asia/Manila"))
-        sBase = nowMnl.strftime("%Y%m%d_%I%M%S_%p").lower()
-
-    sCsv = f"{sBase}.csv"
-
-    # ensure file overwritten if exists (user requested overwrite if identical)
-    if os.path.isfile(sCsv):
-        try:
-            os.remove(sCsv)
-        except Exception:
-            pass
-
+    aRows = []
+    dSeen = set()
     res = Resolver(http)
 
-    nAccum = 0
-    dSeen = set()
+    # Build column headers: standard readable first, then custom
+    aStdCols = ["ID", "Organization", "Assignee", "Group", "Status", "Type", "Subject", "Tags", "Created at", "Updated at"]
+    aCustomCols = [s for (s, t, i) in aFlds]
+    aHeaders = aStdCols + aCustomCols
 
-    # process in chunks and append to csv per chunk
-    for nIdx in range(0, len(aTickets), nChunkSize):
-        aChunk = aTickets[nIdx:nIdx+nChunkSize]
+    # Single CSV file per run, build rows while chunking and printing progress
+    nWritten = 0
+    for i in range(0, len(aTickets), nChunkSize):
+        aChunk = aTickets[i:i+nChunkSize]
         res.preload_from_tickets(aChunk)
-        aRowsBatch = []
+
         for t in aChunk:
             tid = t.get("id")
             if tid in dSeen:
@@ -509,19 +488,18 @@ def main():
                     v = customVal(t, sId)
                 dRow[sName] = v if v is not None else ""
 
-            aRowsBatch.append(dRow)
-            nAccum += 1
+            aRows.append(dRow)
+            nWritten += 1
 
-        # write this batch to CSV immediately (append). Write header only if file missing.
-        bWriteHeader = True
-        writeBatchAppend(sCsv, aHeaders, aRowsBatch, bWriteHeader)
-        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Chunk {(nIdx//nChunkSize)+1}: scanned {len(aChunk)}, accumulated {nAccum}")
+        print(f"[{datetime.datetime.now()}] Chunk {(i//nChunkSize)+1}: scanned {len(aChunk)}, accumulated {nWritten}")
 
-    # final nice maganda na XLSX (optional)
-    if a.xlsx:
-        writeOutputFinalXlsx(sBase, aHeaders)
+    if a.output:
+        sBase = os.path.splitext(a.output)[0]
+    else:
+        nowMnl = datetime.datetime.now(ZoneInfo("Asia/Manila"))
+        sBase = nowMnl.strftime("%Y%m%d_%I%M%S_%p").lower()
 
-    print(f"Wrote CSV -> {sCsv}")
+    writeOutput(sBase, aRows, aHeaders, a.xlsx)
 
 if __name__ == "__main__":
     main()
