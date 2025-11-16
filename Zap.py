@@ -18,37 +18,6 @@ try:
 except Exception:
     xlsxwriter = None
 
-# Loop prompt for a path to the env file for API calls (via arg or default file)
-def loadCreds(sCredsPath):
-    if sCredsPath:
-        if not os.path.isfile(sCredsPath):
-            print("Credentials file not found.")
-            sys.exit(1)
-        load_dotenv(dotenv_path=sCredsPath, override=True)
-    else:
-        sScriptDir = os.path.dirname(os.path.abspath(__file__))
-        sDefault = os.path.join(sScriptDir, "credentials.env")
-        if not os.path.isfile(sDefault):
-            print("Missing credentials.env in this folder. Create a file named credentials.env here with the following contents:")
-            print("")
-            print("ZENDESK_SUBDOMAIN=<Your Subdomain>")
-            print("ZENDESK_EMAIL=<Your Email>")
-            print("ZENDESK_API_TOKEN=<Your Token>")
-            sys.exit(1)
-        load_dotenv(dotenv_path=sDefault, override=True)
-    sSub = os.getenv("ZENDESK_SUBDOMAIN")
-    sEmail = os.getenv("ZENDESK_EMAIL")
-    sTok = os.getenv("ZENDESK_API_TOKEN")
-    if not all([sSub, sEmail, sTok]):
-        print("Incomplete .env file...")
-        print("")
-        print("ZENDESK_SUBDOMAIN=<Your Subdomain>")
-        print("ZENDESK_EMAIL=<Your Email>")
-        print("ZENDESK_API_TOKEN=<Your Token>")
-        sys.exit(1)
-    return sSub, sEmail, sTok
-
-# Build the base URL and authenticate once, used upon every call
 class ZendeskHttp:
     def __init__(self, sSub, sEmail, sTok):
         self.sBase = f"https://{sSub}.zendesk.com"
@@ -131,167 +100,6 @@ class ZendeskHttp:
             sL = dJ.get("next_page")
         return sL
 
-# CSV/XLSX field list reader
-def loadFieldList(sPath):
-    aOut = []
-    if sPath.lower().endswith(".csv"):
-        with open(sPath, "r", encoding="utf-8-sig", newline="") as f:
-            oR = csv.reader(f)
-            aRows = list(oR)
-    else:
-        if openpyxl is None:
-            print("openpyxl required to read XLSX field list.")
-            sys.exit(1)
-        wb = openpyxl.load_workbook(sPath, read_only=True, data_only=True)
-        ws = wb.active
-        aRows = []
-        for row in ws.iter_rows(values_only=True):
-            aRows.append([(c if c is not None else "") for c in row])
-
-    if not aRows:
-        print("Empty fields file.")
-        sys.exit(1)
-
-    aHdr = [str(x).strip() for x in aRows[0]]
-    def colidx(name):
-        try:
-            return aHdr.index(name)
-        except ValueError:
-            return None
-
-    iName = colidx("Display name") or colidx("Field") or 0
-    iType = colidx("Type")
-    iId   = colidx("Field ID") or colidx("ID")
-
-    for r in aRows[1:]:
-        sName = str(r[iName]).strip() if iName is not None and iName < len(r) else ""
-        if not sName:
-            continue
-        sTyp  = str(r[iType]).strip() if iType is not None and iType < len(r) else ""
-        sId   = str(r[iId]).strip() if iId is not None and iId < len(r) else ""
-        aOut.append((sName, sTyp, sId))
-    return aOut
-
-# Print fields line by line
-def printFields(aFields):
-    for sName, sTyp, sId in aFields:
-        sT = f" [{sTyp}]" if sTyp else ""
-        print(f"  {sName}{sT}")
-
-# Parse date ranges
-def parseDateExpr(sExpr):
-    if not sExpr:
-        return []
-    a = []
-    for part in re.split(r"\s+OR\s+", sExpr.strip(), flags=re.IGNORECASE):
-        m = re.match(r"^\s*(\d{4}-\d{2}-\d{2})\s+TO\s+(\d{4}-\d{2}-\d{2})\s*$", part)
-        if not m:
-            print("Invalid date expression. Use: YYYY-MM-DD TO YYYY-MM-DD [OR YYYY-MM-DD TO YYYY-MM-DD]")
-            sys.exit(1)
-        a.append((m.group(1), m.group(2)))
-    return a
-
-# Parse time in AM/PM
-def parseTime12(sVal):
-    try:
-        return datetime.datetime.strptime(sVal.strip(), "%I:%M %p").time()
-    except Exception:
-        print("Invalid time. Use HH:MM AM/PM (e.g., 10:00 AM).")
-        sys.exit(1)
-
-# Build datetime windows in UTC according to rules
-def buildWindowsUtc(aDateRanges, sStartTime, sEndTime):
-    tzMnl = ZoneInfo("Asia/Manila")
-    aOut = []
-
-    nowMnl = datetime.datetime.now(tzMnl)
-
-    if not aDateRanges and not sStartTime and not sEndTime:
-        t = nowMnl.time()
-        def T(h, m): return datetime.time(hour=h, minute=m)
-        if t < T(1,30):
-            d = nowMnl.date()
-            start = datetime.datetime.combine(d, T(13,0), tzMnl)
-            end   = datetime.datetime.combine(d, T(1,30), tzMnl) + datetime.timedelta(days=1)
-            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "afternoon"))
-        elif t < T(9,30):
-            d = nowMnl.date()
-            start = datetime.datetime.combine(d- datetime.timedelta(days=1), T(21,30), tzMnl)
-            end   = datetime.datetime.combine(d, T(9,30), tzMnl)
-            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "evening"))
-        elif t < T(18,30):
-            d = nowMnl.date()
-            start = datetime.datetime.combine(d, T(18,30), tzMnl)
-            end   = datetime.datetime.combine(d+ datetime.timedelta(days=1), T(6,30), tzMnl)
-            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "morning"))
-        else:
-            d = nowMnl.date()
-            start = datetime.datetime.combine(d, T(18,30), tzMnl)
-            end   = datetime.datetime.combine(d+ datetime.timedelta(days=1), T(6,30), tzMnl)
-            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "morning"))
-        return aOut
-
-    if sStartTime or sEndTime:
-        if not (sStartTime and sEndTime):
-            print("Both --start and --end are required if time window is used.")
-            sys.exit(1)
-        tStart = parseTime12(sStartTime)
-        tEnd   = parseTime12(sEndTime)
-        if (datetime.datetime.combine(datetime.date.today(), tEnd) <=
-            datetime.datetime.combine(datetime.date.today(), tStart)):
-            print("Time window must be within the day (end after start).")
-            sys.exit(1)
-
-    if aDateRanges and sStartTime and sEndTime:
-        if len(aDateRanges) != 1:
-            print("If one date only and time range, supply a single date (YYYY-MM-DD TO YYYY-MM-DD with same start/end).")
-            sys.exit(1)
-
-    if not aDateRanges and (sStartTime and sEndTime):
-        d = nowMnl.date()
-        tStart = parseTime12(sStartTime)
-        tEnd   = parseTime12(sEndTime)
-        start = datetime.datetime.combine(d, tStart, tzMnl)
-        end   = datetime.datetime.combine(d, tEnd, tzMnl)
-        aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "time-only"))
-        return aOut
-
-    if aDateRanges and not (sStartTime or sEndTime):
-        for d0, d1 in aDateRanges:
-            sd = datetime.datetime.strptime(d0, "%Y-%m-%d").date()
-            ed = datetime.datetime.strptime(d1, "%Y-%m-%d").date()
-            start = datetime.datetime.combine(sd, datetime.time(0,0), tzMnl)
-            end   = datetime.datetime.combine(ed, datetime.time(23,59,59), tzMnl)
-            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "date-only"))
-        return aOut
-
-    if aDateRanges and sStartTime and sEndTime and len(aDateRanges) == 1:
-        d0, d1 = aDateRanges[0]
-        if d0 != d1:
-            print("If one date only and time range, the date range must be a single day.")
-            sys.exit(1)
-        dd = datetime.datetime.strptime(d0, "%Y-%m-%d").date()
-        tStart = parseTime12(sStartTime)
-        tEnd   = parseTime12(sEndTime)
-        start = datetime.datetime.combine(dd, tStart, tzMnl)
-        end   = datetime.datetime.combine(dd, tEnd, tzMnl)
-        aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "date+time"))
-        return aOut
-
-    print("Invalid date/time combination.")
-    sys.exit(1)
-
-# Value helpers
-def cellValue(vRaw):
-    if vRaw is None:
-        return ""
-    if isinstance(vRaw, (dict, list)):
-        return json.dumps(vRaw, ensure_ascii=False)
-    if isinstance(vRaw, str):
-        return vRaw.replace("\r", " ").replace("\n", " ")
-    return vRaw
-
-# Resolve names
 class Resolver:
     def __init__(self, http: ZendeskHttp):
         self.h = http
@@ -338,18 +146,100 @@ class Resolver:
     def user_name(self, v): return self.usr.get(str(v), "")
     def group_name(self, v): return self.grp.get(str(v), "")
 
-# Extract custom field by id
-def customVal(dT, nId):
-    try:
-        for cf in dT.get("custom_fields", []):
-            if str(cf.get("id")) == str(nId):
-                return cf.get("value")
-    except Exception:
-        return None
-    return None
+def buildWindowsUtc(sDateExpr, sStartTime, sEndTime):
+    tzMnl = ZoneInfo("Asia/Manila")
+    aDateRanges = []
+    if sDateExpr:
+        for part in re.split(r"\s+OR\s+", sDateExpr.strip(), flags=re.IGNORECASE):
+            m = re.match(r"^\s*(\d{4}-\d{2}-\d{2})\s+TO\s+(\d{4}-\d{2}-\d{2})\s*$", part)
+            if not m:
+                print("Invalid date expression. Use: YYYY-MM-DD TO YYYY-MM-DD [OR YYYY-MM-DD TO YYYY-MM-DD]")
+                sys.exit(1)
+            aDateRanges.append((m.group(1), m.group(2)))
 
-# Harvest within windows
+    aOut = []
+    nowMnl = datetime.datetime.now(tzMnl)
+
+    if not aDateRanges and not sStartTime and not sEndTime:
+        t = nowMnl.time()
+        def T(h, m): return datetime.time(hour=h, minute=m)
+        if t < T(1,30):
+            d = nowMnl.date()
+            start = datetime.datetime.combine(d, T(13,0), tzMnl)
+            end   = datetime.datetime.combine(d, T(1,30), tzMnl) + datetime.timedelta(days=1)
+            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "afternoon"))
+        elif t < T(9,30):
+            d = nowMnl.date()
+            start = datetime.datetime.combine(d- datetime.timedelta(days=1), T(21,30), tzMnl)
+            end   = datetime.datetime.combine(d, T(9,30), tzMnl)
+            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "evening"))
+        elif t < T(18,30):
+            d = nowMnl.date()
+            start = datetime.datetime.combine(d, T(18,30), tzMnl)
+            end   = datetime.datetime.combine(d+ datetime.timedelta(days=1), T(6,30), tzMnl)
+            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "morning"))
+        else:
+            d = nowMnl.date()
+            start = datetime.datetime.combine(d, T(18,30), tzMnl)
+            end   = datetime.datetime.combine(d+ datetime.timedelta(days=1), T(6,30), tzMnl)
+            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "morning"))
+        return aOut
+
+    if sStartTime or sEndTime:
+        if not (sStartTime and sEndTime):
+            print("Both --start and --end are required if time window is used.")
+            sys.exit(1)
+        try:
+            tStart = datetime.datetime.strptime(sStartTime.strip(), "%I:%M %p").time()
+            tEnd   = datetime.datetime.strptime(sEndTime.strip(), "%I:%M %p").time()
+        except Exception:
+            print("Invalid time. Use HH:MM AM/PM (e.g., 10:00 AM).")
+            sys.exit(1)
+        if (datetime.datetime.combine(datetime.date.today(), tEnd) <=
+            datetime.datetime.combine(datetime.date.today(), tStart)):
+            print("Time window must be within the day (end after start).")
+            sys.exit(1)
+    else:
+        tStart = None
+        tEnd = None
+
+    if aDateRanges and sStartTime and sEndTime:
+        if len(aDateRanges) != 1:
+            print("If one date only and time range, supply a single date (YYYY-MM-DD TO YYYY-MM-DD with same start/end).")
+            sys.exit(1)
+
+    if not aDateRanges and (sStartTime and sEndTime):
+        d = nowMnl.date()
+        start = datetime.datetime.combine(d, tStart, tzMnl)
+        end   = datetime.datetime.combine(d, tEnd, tzMnl)
+        aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "time-only"))
+        return aOut
+
+    if aDateRanges and not (sStartTime or sEndTime):
+        for d0, d1 in aDateRanges:
+            sd = datetime.datetime.strptime(d0, "%Y-%m-%d").date()
+            ed = datetime.datetime.strptime(d1, "%Y-%m-%d").date()
+            start = datetime.datetime.combine(sd, datetime.time(0,0), tzMnl)
+            end   = datetime.datetime.combine(ed, datetime.time(23,59,59), tzMnl)
+            aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "date-only"))
+        return aOut
+
+    if aDateRanges and sStartTime and sEndTime and len(aDateRanges) == 1:
+        d0, d1 = aDateRanges[0]
+        if d0 != d1:
+            print("If one date only and time range, the date range must be a single day.")
+            sys.exit(1)
+        dd = datetime.datetime.strptime(d0, "%Y-%m-%d").date()
+        start = datetime.datetime.combine(dd, tStart, tzMnl)
+        end   = datetime.datetime.combine(dd, tEnd, tzMnl)
+        aOut.append((start.astimezone(datetime.timezone.utc), end.astimezone(datetime.timezone.utc), "date+time"))
+        return aOut
+
+    print("Invalid date/time combination.")
+    sys.exit(1)
+
 def harvestTicketsInWindows(oHttp, aWindowsUtc):
+    aIds = []
     aAll = []
     seen = set()
     for (dtStartUtc, dtEndUtc, label) in aWindowsUtc:
@@ -365,18 +255,40 @@ def harvestTicketsInWindows(oHttp, aWindowsUtc):
                     if tid in seen:
                         continue
                     seen.add(tid)
-                    aAll.append(r)
+                    aIds.append(str(tid))
             sPage = oHttp.next_link(dJ)
+
+    if not aIds:
+        return []
+
+    nChunk = 100
+    for i in range(0, len(aIds), nChunk):
+        aChunkIds = aIds[i:i+nChunk]
+        sUrl = f"{oHttp.sBase}/api/v2/tickets/show_many.json?ids={','.join(aChunkIds)}"
+        dT = oHttp._get_json(sUrl)
+        for t in dT.get("tickets", []):
+            aAll.append(t)
     return aAll
 
-# Write one CSV and optional XLSX
 def writeOutput(sBaseName, aRows, aHeaders, bMakeXlsx):
     sCsv = f"{sBaseName}.csv"
     with open(sCsv, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=aHeaders, extrasaction="ignore", quoting=csv.QUOTE_ALL, lineterminator="\r\n")
         w.writeheader()
         for row in aRows:
-            w.writerow({k: cellValue(row.get(k)) for k in aHeaders})
+            dOut = {}
+            for k in aHeaders:
+                vRaw = row.get(k)
+                if vRaw is None:
+                    vCell = ""
+                elif isinstance(vRaw, (dict, list)):
+                    vCell = json.dumps(vRaw, ensure_ascii=False)
+                elif isinstance(vRaw, str):
+                    vCell = vRaw.replace("\r", " ").replace("\n", " ")
+                else:
+                    vCell = vRaw
+                dOut[k] = vCell
+            w.writerow(dOut)
     print(f"Wrote CSV -> {sCsv}")
 
     if bMakeXlsx:
@@ -392,7 +304,16 @@ def writeOutput(sBaseName, aRows, aHeaders, bMakeXlsx):
             ws.write(0, j, h, fmtHead)
         for i, row in enumerate(aRows, start=1):
             for j, h in enumerate(aHeaders):
-                ws.write(i, j, cellValue(row.get(h)), fmtVal)
+                vRaw = row.get(h)
+                if vRaw is None:
+                    vCell = ""
+                elif isinstance(vRaw, (dict, list)):
+                    vCell = json.dumps(vRaw, ensure_ascii=False)
+                elif isinstance(vRaw, str):
+                    vCell = vRaw.replace("\r", " ").replace("\n", " ")
+                else:
+                    vCell = vRaw
+                ws.write(i, j, vCell, fmtVal)
         ws.set_row(0, 22)
         for j in range(len(aHeaders)):
             ws.set_column(j, j, 28)
@@ -428,11 +349,90 @@ def main():
 
     a = oP.parse_args()
 
-    aFlds = loadFieldList(a.fields)
-    print("Fields loaded:")
-    printFields(aFlds)
+    sPath = a.fields
+    aFlds = []
+    if sPath.lower().endswith(".csv"):
+        with open(sPath, "r", encoding="utf-8-sig", newline="") as f:
+            oR = csv.reader(f)
+            aRows = list(oR)
+    else:
+        if openpyxl is None:
+            print("openpyxl required to read XLSX field list.")
+            sys.exit(1)
+        wb = openpyxl.load_workbook(sPath, read_only=True, data_only=True)
+        ws = wb.active
+        aRows = []
+        for row in ws.iter_rows(values_only=True):
+            aRows.append([(c if c is not None else "") for c in row])
 
-    sSub, sEmail, sTok = loadCreds(a.creds)
+    if not aRows:
+        print("Empty fields file.")
+        sys.exit(1)
+
+    aHdr = [str(x).strip() for x in aRows[0]]
+
+    try:
+        iName = aHdr.index("Display name")
+    except ValueError:
+        try:
+            iName = aHdr.index("Field")
+        except ValueError:
+            iName = 0
+
+    try:
+        iType = aHdr.index("Type")
+    except ValueError:
+        iType = None
+
+    try:
+        iId = aHdr.index("Field ID")
+    except ValueError:
+        try:
+            iId = aHdr.index("ID")
+        except ValueError:
+            iId = None
+
+    for r in aRows[1:]:
+        sName = str(r[iName]).strip() if iName is not None and iName < len(r) else ""
+        if not sName:
+            continue
+        sTyp  = str(r[iType]).strip() if iType is not None and iType < len(r) else ""
+        sId   = str(r[iId]).strip() if iId is not None and iId < len(r) else ""
+        aFlds.append((sName, sTyp, sId))
+
+    print("Fields loaded:")
+    for sName, sTyp, sId in aFlds:
+        sT = f" [{sTyp}]" if sTyp else ""
+        print(f"  {sName}{sT}")
+
+    sCredsPath = a.creds
+    if sCredsPath:
+        if not os.path.isfile(sCredsPath):
+            print("Credentials file not found.")
+            sys.exit(1)
+        load_dotenv(dotenv_path=sCredsPath, override=True)
+    else:
+        sScriptDir = os.path.dirname(os.path.abspath(__file__))
+        sDefault = os.path.join(sScriptDir, "credentials.env")
+        if not os.path.isfile(sDefault):
+            print("Missing credentials.env in this folder. Create a file named credentials.env here with the following contents:")
+            print("")
+            print("ZENDESK_SUBDOMAIN=<Your Subdomain>")
+            print("ZENDESK_EMAIL=<Your Email>")
+            print("ZENDESK_API_TOKEN=<Your Token>")
+            sys.exit(1)
+        load_dotenv(dotenv_path=sDefault, override=True)
+    sSub = os.getenv("ZENDESK_SUBDOMAIN")
+    sEmail = os.getenv("ZENDESK_EMAIL")
+    sTok = os.getenv("ZENDESK_API_TOKEN")
+    if not all([sSub, sEmail, sTok]):
+        print("Incomplete .env file...")
+        print("")
+        print("ZENDESK_SUBDOMAIN=<Your Subdomain>")
+        print("ZENDESK_EMAIL=<Your Email>")
+        print("ZENDESK_API_TOKEN=<Your Token>")
+        sys.exit(1)
+
     http = ZendeskHttp(sSub, sEmail, sTok)
 
     dMe = http._get_json(f"{http.sBase}/api/v2/users/me.json")
@@ -442,22 +442,19 @@ def main():
         print(json.dumps(dMe, ensure_ascii=False))
         sys.exit(1)
 
-    aDateRanges = parseDateExpr(a.date) if a.date else []
-    aWindowsUtc = buildWindowsUtc(aDateRanges, a.start, a.end)
+    aWindowsUtc = buildWindowsUtc(a.date, a.start, a.end)
 
     aTickets = harvestTicketsInWindows(http, aWindowsUtc)
 
     nChunkSize = 50
-    aRows = []
+    aRowsOut = []
     dSeen = set()
     res = Resolver(http)
 
-    # Build column headers: standard readable first, then custom
     aStdCols = ["ID", "Organization", "Assignee", "Group", "Status", "Type", "Subject", "Tags", "Created at", "Updated at"]
     aCustomCols = [s for (s, t, i) in aFlds]
     aHeaders = aStdCols + aCustomCols
 
-    # Single CSV file per run, build rows while chunking and printing progress
     nWritten = 0
     for i in range(0, len(aTickets), nChunkSize):
         aChunk = aTickets[i:i+nChunkSize]
@@ -485,10 +482,18 @@ def main():
             for sName, sTyp, sId in aFlds:
                 v = ""
                 if sId:
-                    v = customVal(t, sId)
-                dRow[sName] = v if v is not None else ""
+                    vCf = None
+                    try:
+                        for cf in t.get("custom_fields", []):
+                            if str(cf.get("id")) == str(sId):
+                                vCf = cf.get("value")
+                                break
+                    except Exception:
+                        vCf = None
+                    v = vCf if vCf is not None else ""
+                dRow[sName] = v
 
-            aRows.append(dRow)
+            aRowsOut.append(dRow)
             nWritten += 1
 
         print(f"[{datetime.datetime.now()}] Chunk {(i//nChunkSize)+1}: scanned {len(aChunk)}, accumulated {nWritten}")
@@ -499,7 +504,15 @@ def main():
         nowMnl = datetime.datetime.now(ZoneInfo("Asia/Manila"))
         sBase = nowMnl.strftime("%Y%m%d_%I%M%S_%p").lower()
 
-    writeOutput(sBase, aRows, aHeaders, a.xlsx)
+    writeOutput(sBase, aRowsOut, aHeaders, a.xlsx)
+
+    if aTickets:
+        sRaw = f"{sBase}.txt"
+        with open(sRaw, "w", encoding="utf-8-sig") as f:
+            for t in aTickets:
+                f.write(json.dumps(t, ensure_ascii=False))
+                f.write("\n")
+        print(f"Wrote raw tickets -> {sRaw}")
 
 if __name__ == "__main__":
     main()
